@@ -125,16 +125,16 @@ body {
 }
 .balloon-pin {
   position:absolute;
-  transform:translate(-50%,-50%);
-  width:22px; height:22px;
+  width:20px; height:20px;
   background:#e53e3e;
-  border:2.5px solid #fff;
+  border:2px solid #fff;
   border-radius:50%;
   display:flex; align-items:center; justify-content:center;
-  color:#fff; font-weight:800; font-size:10px;
+  color:#fff; font-weight:800; font-size:9px;
   font-family:"Microsoft JhengHei",Arial,sans-serif;
-  box-shadow:0 1px 5px rgba(0,0,0,.55);
+  box-shadow:0 1px 4px rgba(0,0,0,.6);
   line-height:1;
+  /* 兩種方向都用 JS 設置，這裡只設共用樣式 */
 }
 
 /* 資訊列 */
@@ -315,7 +315,7 @@ body {
         <div class="d-flex align-items-center gap-2 p-2 rounded" style="background:#f1f5f9;font-size:.78rem">
           <div class="form-check form-switch mb-0">
             <input class="form-check-input" type="checkbox" id="all-pages-toggle">
-            <label class="form-check-label" for="all-pages-toggle">整合全頁</label>
+            <label class="form-check-label" for="all-pages-toggle" title="多頁PDF時，整合全部頁面的尺寸；否則只分析指定頁">整合全頁</label>
           </div>
           <span>頁：</span>
           <input type="number" id="page-input" value="1" min="1"
@@ -374,6 +374,11 @@ body {
 
     <!-- 結果 -->
     <div id="result-section">
+      <!-- 0 項警告 -->
+      <div id="zero-warn" style="display:none;background:#fff7ed;border:1.5px solid #fed7aa;border-radius:10px;padding:12px 16px;margin-bottom:12px;font-size:.82rem;color:#92400e">
+        <i class="bi bi-exclamation-triangle me-2"></i>
+        <span id="zero-warn-msg">AI 未識別到任何尺寸，請確認圖面是否清晰，或重新上傳。</span>
+      </div>
 
       <!-- 1. 圖面顯示（最頂部） -->
       <div class="drawing-panel" id="drawing-panel">
@@ -575,7 +580,22 @@ function handleFile(file) {
     reader.onload = e => { thumbImg.src = e.target.result; };
     reader.readAsDataURL(file);
   } else {
+    // PDF：即時取得第一頁縮圖
     thumbImg.src = '';
+    thumbWrap.style.display = 'block';
+    fileInfo.textContent = `${file.name} · 載入預覽中…`;
+    const fd2 = new FormData();
+    fd2.append('file', file);
+    fetch('/api/thumbnail', { method: 'POST', body: fd2 })
+      .then(r => r.json())
+      .then(d => {
+        if (d.thumbnail) {
+          thumbImg.src = d.thumbnail;
+          fileInfo.textContent = `${file.name} · ${(file.size/1024).toFixed(0)} KB`;
+        } else {
+          fileInfo.textContent = `${file.name} · ${(file.size/1024).toFixed(0)} KB`;
+        }
+      }).catch(() => {});
   }
   thumbWrap.style.display = 'block';
   fileInfo.textContent = `${file.name}  ·  ${(file.size/1024).toFixed(0)} KB`;
@@ -601,6 +621,11 @@ analyzeBtn.addEventListener('click', async () => {
     if (!resp.ok) { showError(data.detail || `分析失敗 (${resp.status})`); return; }
     currentData = data;
     renderResult(data);
+    // 若後端有警告（0 項 parse error）
+    if (data._warn) {
+      document.getElementById('zero-warn-msg').textContent = data._warn;
+      document.getElementById('zero-warn').style.display = 'block';
+    }
   } catch(err) {
     showError('網路錯誤：' + err.message);
   } finally {
@@ -614,10 +639,18 @@ let balloonData = [];  // [{item_no, x, y}, ...]
 function renderBalloons(dims) {
   balloonData = [];
   dims.forEach(dim => {
-    const x = (dim.x != null) ? parseFloat(dim.x) : null;
-    const y = (dim.y != null) ? parseFloat(dim.y) : null;
-    if (x == null || y == null || isNaN(x) || isNaN(y)) return;
-    balloonData.push({ item_no: dim.item_no ?? (balloonData.length + 1), x, y });
+    const cx = (dim.x  != null) ? parseFloat(dim.x)  : null;
+    const cy = (dim.y  != null) ? parseFloat(dim.y)  : null;
+    if (cx == null || cy == null || isNaN(cx) || isNaN(cy)) return;
+    balloonData.push({
+      item_no:     dim.item_no ?? (balloonData.length + 1),
+      cx, cy,
+      x1p: dim.x1p ?? cx,
+      y1p: dim.y1p ?? cy,
+      x2p: dim.x2p ?? cx,
+      y2p: dim.y2p ?? cy,
+      orientation: dim.orientation || 'h',
+    });
   });
   drawBalloons();
 }
@@ -627,13 +660,30 @@ function drawBalloons() {
   layer.innerHTML = '';
   if (!document.getElementById('balloon-toggle').checked) return;
 
+  const PIN = 20;   // balloon 直徑 px
+  const GAP = 3;    // 與尺寸文字的間距 px
+
   balloonData.forEach(b => {
     const pin = document.createElement('div');
     pin.className = 'balloon-pin';
-    // left/top 百分比直接對應圖面 x/y 比例
-    pin.style.left = b.x + '%';
-    pin.style.top  = b.y + '%';
     pin.textContent = b.item_no;
+
+    if (b.orientation === 'v') {
+      // 縱向尺寸：球標在文字下方中央
+      // left: cx%, 水平居中（translate -50%）
+      // top: y2p%，再加 GAP px 間距
+      pin.style.left      = b.cx + '%';
+      pin.style.top       = b.y2p + '%';
+      pin.style.transform = `translate(-50%, ${GAP}px)`;
+    } else {
+      // 橫向尺寸（預設）：球標在文字左側垂直居中
+      // left: x1p%，再往左 GAP+PIN px
+      // top: cy%，垂直居中
+      pin.style.left      = b.x1p + '%';
+      pin.style.top       = b.cy + '%';
+      pin.style.transform = `translate(calc(-100% - ${GAP}px), -50%)`;
+    }
+
     layer.appendChild(pin);
   });
 }
@@ -674,10 +724,21 @@ function renderResult(data) {
   document.getElementById('res-internal').value = '';
 
   // 表格
-  renderTable(data.dimensions || []);
+  const dims = data.dimensions || [];
+  renderTable(dims);
 
-  // 球標（圖片載入後在 onload 觸發，此時先預備資料）
-  renderBalloons(data.dimensions || []);
+  // 球標
+  renderBalloons(dims);
+
+  // 0 項警告
+  const zeroWarn = document.getElementById('zero-warn');
+  if (dims.length === 0) {
+    document.getElementById('zero-warn-msg').textContent =
+      'AI 未識別到任何尺寸，建議：① 確認圖面清晰度 ② 重新上傳 ③ 若為 PDF 可嘗試調高解析度';
+    zeroWarn.style.display = 'block';
+  } else {
+    zeroWarn.style.display = 'none';
+  }
 
   showSection('result-section');
 }

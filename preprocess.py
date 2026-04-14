@@ -1,9 +1,8 @@
 """
-圖面預處理模組 — 使用 PIL + NumPy 偵測橙色/黃色標記尺寸
+圖面預處理模組 — HSV 色彩空間偵測橙色/金色標記尺寸
 """
 
-import io
-import base64
+import io, base64
 from PIL import Image, ImageDraw
 
 try:
@@ -13,13 +12,109 @@ except ImportError:
     _HAS_NUMPY = False
 
 
+def _split_at_gaps(boxes: list, orange_mask, min_gap: int = 2) -> list:
+    """
+    對每個 bounding box，找出內部的水平空白間隙並切割。
+    只處理「非邊緣」的內部間隙（排除頂部/底部空白行）。
+    每段結果會自動裁剪至實際橙色像素的範圍。
+    """
+    result = []
+    for box in boxes:
+        bh = box["y2"] - box["y1"]
+        if bh < 18:
+            result.append(box)
+            continue
+
+        sub = orange_mask[box["y1"]:box["y2"], box["x1"]:box["x2"]]
+        row_has = sub.any(axis=1)   # True/False per row
+
+        # 找出有橙色像素的實際範圍
+        orange_rows = [i for i, h in enumerate(row_has) if h]
+        if not orange_rows:
+            continue
+        first_row, last_row = orange_rows[0], orange_rows[-1]
+        effective_height = last_row - first_row + 1
+        if effective_height < 18:   # 實際橙色範圍太矮，不切割
+            result.append(box)
+            continue
+
+        # 在實際橙色範圍內找內部間隙（排除邊緣 3 列）
+        EDGE = 3
+        gaps = []
+        empty_run = 0
+        empty_start = -1
+        for i in range(first_row + EDGE, last_row - EDGE + 1):
+            if not row_has[i]:
+                if empty_run == 0:
+                    empty_start = i
+                empty_run += 1
+            else:
+                if empty_run >= min_gap:
+                    gaps.append((empty_start, i))
+                empty_run = 0
+
+        if not gaps:
+            result.append(box)
+            continue
+
+        # 按間隙切割，每段只保留有橙色像素的部分
+        cut_points = [first_row]
+        for g_s, g_e in gaps:
+            cut_points.append((g_s + g_e) // 2)
+        cut_points.append(last_row + 1)
+
+        for ci in range(len(cut_points) - 1):
+            seg_s, seg_e = cut_points[ci], cut_points[ci+1]
+            # 裁剪至段內實際橙色範圍
+            seg_rows = [i for i in range(seg_s, seg_e) if row_has[i]]
+            if not seg_rows:
+                continue
+            y1_new = box["y1"] + seg_rows[0]
+            y2_new = box["y1"] + seg_rows[-1] + 1
+            if y2_new - y1_new < 4:
+                continue
+            result.append({
+                "x1": box["x1"], "y1": y1_new,
+                "x2": box["x2"], "y2": y2_new,
+            })
+
+    return result
+
+
+def _rgb_to_hsv(R, G, B):
+    """NumPy 向量化 RGB→HSV，H: 0-360, S/V: 0-1"""
+    r = R.astype(np.float32) / 255.0
+    g = G.astype(np.float32) / 255.0
+    b = B.astype(np.float32) / 255.0
+
+    Cmax  = np.maximum(np.maximum(r, g), b)
+    Cmin  = np.minimum(np.minimum(r, g), b)
+    delta = Cmax - Cmin
+    eps   = 1e-8
+
+    H = np.zeros(r.shape, dtype=np.float32)
+    m_r = (Cmax == r) & (delta > eps)
+    m_g = (Cmax == g) & (delta > eps)
+    m_b = (Cmax == b) & (delta > eps)
+    H[m_r] = (60 * ((g[m_r] - b[m_r]) / delta[m_r])) % 360
+    H[m_g] =  60 * ((b[m_g] - r[m_g]) / delta[m_g]) + 120
+    H[m_b] =  60 * ((r[m_b] - g[m_b]) / delta[m_b]) + 240
+
+    S = np.where(Cmax > eps, delta / Cmax, 0.0).astype(np.float32)
+    V = Cmax
+    return H, S, V
+
+
 def find_orange_regions(image_path: str) -> tuple[list, str | None]:
     """
-    偵測工程圖面中橙色/黃色文字的位置，並在原圖上畫藍色標記框。
+    用 HSV 色彩空間偵測橙色/金色文字位置。
 
     Returns:
-        regions: list of {"idx":int, "x1","y1","x2","y2" (pixel), "cx","cy" (0-100 pct)}
-        annotated_b64: 帶有藍色框標記的圖片 base64，若未偵測到橙色則 None
+      regions : [{"idx","x1","y1","x2","y2",  ← pixel coords
+                  "x1p","y1p","x2p","y2p",    ← % coords (0-100)
+                  "cx","cy",                   ← center % coords
+                  "orientation"},...]          ← "h" 或 "v"
+      annotated_b64 : JPEG base64 標記圖，或 None
     """
     if not _HAS_NUMPY:
         return [], None
@@ -27,39 +122,42 @@ def find_orange_regions(image_path: str) -> tuple[list, str | None]:
     img = Image.open(image_path).convert('RGB')
     W, H = img.size
 
-    arr = np.array(img, dtype=np.int32)
-    R = arr[:, :, 0]
-    G = arr[:, :, 1]
-    B = arr[:, :, 2]
+    arr = np.array(img, dtype=np.uint8)
+    Rch = arr[:,:,0].astype(np.int32)
+    Gch = arr[:,:,1].astype(np.int32)
+    Bch = arr[:,:,2].astype(np.int32)
 
-    # 橙色/金黃色文字偵測條件：
-    # R 高（文字主色）、G 中等、B 低 → 橙/金色
-    # 兼容略偏黃或深橙
-    orange_mask = (
-        (R > 155) &
-        (G > 75)  & (G < 225) &
-        (B < 110) &
-        (R - G > 15) &   # R 明顯大於 G（排除白/灰）
-        (R - B > 90)     # R 遠大於 B（排除藍/紫）
+    hue, sat, val = _rgb_to_hsv(
+        arr[:,:,0], arr[:,:,1], arr[:,:,2]
     )
 
-    total_orange = int(orange_mask.sum())
-    print(f"  [preprocess] 偵測到橙色像素：{total_orange}")
+    # ── HSV 橙色偵測 ─────────────────────────────────────
+    # 橙/金色工程圖標注典型值：H≈20-40°，S>0.55，V>0.45
+    # 排除 title block 底部區域（佔高度最後 12%）
+    title_cutoff = int(H * 0.88)
 
-    if total_orange < 25:
+    orange_mask = (
+        (hue >= 12) & (hue <= 44) &   # 橙到金黃色 Hue 範圍
+        (sat > 0.52) &                  # 飽和度夠高（排除灰/白）
+        (val > 0.42)                    # 亮度夠（排除暗棕/黑）
+    )
+    # 排除 title block 區域
+    orange_mask[title_cutoff:, :] = False
+
+    total = int(orange_mask.sum())
+    print(f"  [preprocess] 橙色像素：{total}")
+    if total < 15:
         return [], None
 
-    # ── Grid-based clustering（20×20px 格）────────────────
-    CELL = 18
-    ys, xs = np.where(orange_mask)
-    gx = (xs // CELL).astype(np.int32)
-    gy = (ys // CELL).astype(np.int32)
-    grid = set(zip(gx.tolist(), gy.tolist()))
+    # ── 4-連通 Grid clustering（CELL=14px）────────────────
+    CELL = 14
+    ys_px, xs_px = np.where(orange_mask)
+    gx_arr = (xs_px // CELL).astype(np.int32)
+    gy_arr = (ys_px // CELL).astype(np.int32)
+    grid = set(zip(gx_arr.tolist(), gy_arr.tolist()))
 
-    # BFS 找連通區域
     visited = set()
     components = []
-
     for key in grid:
         if key in visited:
             continue
@@ -72,101 +170,163 @@ def find_orange_regions(image_path: str) -> tuple[list, str | None]:
             visited.add(k)
             comp.append(k)
             kx, ky = k
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    nk = (kx + dx, ky + dy)
-                    if nk not in visited:
-                        queue.append(nk)
+            for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+                nk = (kx+dx, ky+dy)
+                if nk not in visited:
+                    queue.append(nk)
         if len(comp) >= 2:
             components.append(comp)
 
-    print(f"  [preprocess] 找到 {len(components)} 個橙色文字群組")
+    print(f"  [preprocess] grid 群組：{len(components)}")
 
-    # 轉換為像素 bounding box
-    PAD = 6
-    raw_regions = []
+    # ── 轉為 pixel bbox，過濾雜訊 ────────────────────────
+    PAD = 4
+    raw = []
     for comp in components:
-        cx_cells = [c[0] for c in comp]
-        cy_cells = [c[1] for c in comp]
-        x1 = max(0, min(cx_cells) * CELL - PAD)
-        y1 = max(0, min(cy_cells) * CELL - PAD)
-        x2 = min(W, (max(cx_cells) + 1) * CELL + PAD)
-        y2 = min(H, (max(cy_cells) + 1) * CELL + PAD)
-        area = (x2 - x1) * (y2 - y1)
-        if area < 60:          # 過小雜訊排除
+        cx_c = [c[0] for c in comp]
+        cy_c = [c[1] for c in comp]
+        x1 = max(0,  min(cx_c)*CELL - PAD)
+        y1 = max(0,  min(cy_c)*CELL - PAD)
+        x2 = min(W, (max(cx_c)+1)*CELL + PAD)
+        y2 = min(H, (max(cy_c)+1)*CELL + PAD)
+        bw, bh = x2-x1, y2-y1
+        area = bw * bh
+        if area < 80:                  # 太小：JPEG 雜訊
             continue
-        if area > W * H * 0.15:  # 過大（整塊橙色背景）排除
+        if area > W * H * 0.06:        # 太大：背景色塊
             continue
-        raw_regions.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        ratio = max(bw, bh) / max(min(bw, bh), 1)
+        if ratio > 18:                 # 極細長：邊框線段
+            continue
+        raw.append({"x1":x1,"y1":y1,"x2":x2,"y2":y2})
 
-    if not raw_regions:
+    if not raw:
         return [], None
 
-    # 排序：由上到下、由左到右
-    raw_regions.sort(key=lambda r: (round((r["y1"] + r["y2"]) / 2 / 15) * 15,
-                                    (r["x1"] + r["x2"]) / 2))
+    # ── Step A：切割含水平間隙的框（垂直堆疊尺寸被合併時）─
+    # 例：42.73 和 37.20 太靠近，grid 合成一框 → 找空白列分割
+    raw = _split_at_gaps(raw, orange_mask, min_gap=2)
 
-    # 合併過於接近的框（中心距 < 40px）
-    merged = []
-    used = [False] * len(raw_regions)
-    for i, ri in enumerate(raw_regions):
-        if used[i]:
-            continue
+    # ── Step B：同行合併（同一尺寸數字的字元碎片）──────────
+    # 條件：Y 範圍有重疊（實際同一文字行）且 水平距離 < 65px
+    raw.sort(key=lambda r: ((r["y1"]+r["y2"])//2, (r["x1"]+r["x2"])//2))
+    used = [False]*len(raw)
+    line_merged = []
+    for i, ri in enumerate(raw):
+        if used[i]: continue
         group = [ri]
         used[i] = True
-        cxi = (ri["x1"] + ri["x2"]) / 2
-        cyi = (ri["y1"] + ri["y2"]) / 2
-        for j, rj in enumerate(raw_regions):
-            if used[j]:
-                continue
-            cxj = (rj["x1"] + rj["x2"]) / 2
-            cyj = (rj["y1"] + rj["y2"]) / 2
-            if ((cxi - cxj) ** 2 + (cyi - cyj) ** 2) ** 0.5 < 40:
+        for j in range(i+1, len(raw)):
+            if used[j]: continue
+            rj = raw[j]
+            # Y 範圍是否重疊（允許 2px 容差）
+            y_overlap = (ri["y1"] <= rj["y2"] + 2) and (rj["y1"] <= ri["y2"] + 2)
+            # 水平距離夠近
+            cx_i = (ri["x1"]+ri["x2"])/2
+            cx_j = (rj["x1"]+rj["x2"])/2
+            x_close = abs(cx_i-cx_j) < 70
+            if y_overlap and x_close:
                 group.append(rj)
                 used[j] = True
-        x1m = min(g["x1"] for g in group)
-        y1m = min(g["y1"] for g in group)
-        x2m = max(g["x2"] for g in group)
-        y2m = max(g["y2"] for g in group)
-        merged.append({"x1": x1m, "y1": y1m, "x2": x2m, "y2": y2m})
-
-    # 再次排序並加上 index + pct 座標
-    merged.sort(key=lambda r: (round((r["y1"] + r["y2"]) / 2 / 15) * 15,
-                               (r["x1"] + r["x2"]) / 2))
-    regions = []
-    for idx, r in enumerate(merged):
-        regions.append({
-            "idx":  idx + 1,
-            "x1":   r["x1"], "y1": r["y1"],
-            "x2":   r["x2"], "y2": r["y2"],
-            "cx":   round((r["x1"] + r["x2"]) / 2 / W * 100, 1),
-            "cy":   round((r["y1"] + r["y2"]) / 2 / H * 100, 1),
+        line_merged.append({
+            "x1": min(g["x1"] for g in group),
+            "y1": min(g["y1"] for g in group),
+            "x2": max(g["x2"] for g in group),
+            "y2": max(g["y2"] for g in group),
         })
 
-    print(f"  [preprocess] 合併後：{len(regions)} 個標記框")
-    for r in regions:
-        print(f"    #{r['idx']}  box=({r['x1']},{r['y1']})-({r['x2']},{r['y2']})  center=({r['cx']}%,{r['cy']}%)")
+    # ── 再次過濾合併後太大的框 ────────────────────────────
+    filtered = []
+    for r in line_merged:
+        bw, bh = r["x2"]-r["x1"], r["y2"]-r["y1"]
+        area = bw * bh
+        if area > W * H * 0.04:
+            continue
+        # 排除極寬框（可能是整行標題文字合併）
+        if bw > W * 0.35:
+            continue
+        filtered.append(r)
 
-    # ── 繪製藍色標記框 ────────────────────────────────────
-    annotated = img.copy()
-    draw = ImageDraw.Draw(annotated)
+    if not filtered:
+        return [], None
+
+    # ── 排序：由上到下、由左到右 ─────────────────────────
+    filtered.sort(key=lambda r: (
+        round((r["y1"]+r["y2"])/2 / 20) * 20,
+        (r["x1"]+r["x2"])/2
+    ))
+
+    # ── 加入 orientation、百分比座標 ─────────────────────
+    regions = []
+    for idx, r in enumerate(filtered):
+        bw, bh = r["x2"]-r["x1"], r["y2"]-r["y1"]
+        orient = "h" if bw >= bh else "v"
+        regions.append({
+            "idx": idx+1,
+            "x1": r["x1"], "y1": r["y1"],
+            "x2": r["x2"], "y2": r["y2"],
+            # 百分比（供前端定位）
+            "x1p": round(r["x1"]/W*100, 2),
+            "y1p": round(r["y1"]/H*100, 2),
+            "x2p": round(r["x2"]/W*100, 2),
+            "y2p": round(r["y2"]/H*100, 2),
+            "cx":  round((r["x1"]+r["x2"])/2/W*100, 2),
+            "cy":  round((r["y1"]+r["y2"])/2/H*100, 2),
+            "orientation": orient,
+        })
+
+    print(f"  [preprocess] 最終 {len(regions)} 個標記框")
     for r in regions:
-        # 外框（白色加粗，增強對比）
-        draw.rectangle([r["x1"] - 2, r["y1"] - 2,
-                        r["x2"] + 2, r["y2"] + 2],
-                       outline=(255, 255, 255), width=3)
-        # 藍色主框
-        draw.rectangle([r["x1"], r["y1"], r["x2"], r["y2"]],
-                       outline=(0, 140, 255), width=2)
-        # 序號標籤（藍底白字）
-        lx, ly = r["x1"], max(0, r["y1"] - 16)
-        draw.rectangle([lx, ly, lx + 16, ly + 14],
-                       fill=(0, 140, 255))
-        draw.text((lx + 2, ly + 1), str(r["idx"]),
-                  fill=(255, 255, 255))
+        print(f"    #{r['idx']} ({r['orientation']}) "
+              f"px=({r['x1']},{r['y1']})-({r['x2']},{r['y2']}) "
+              f"center=({r['cx']}%,{r['cy']}%)")
+
+    # ── 繪製標記圖 ───────────────────────────────────────
+    MAX_W = 1600
+    ann   = img.copy()
+    scale = 1.0
+    if W > MAX_W:
+        scale = MAX_W / W
+        ann = ann.resize((MAX_W, int(H*scale)), Image.LANCZOS)
+
+    draw = ImageDraw.Draw(ann)
+    for r in regions:
+        def s(v): return int(v * scale)
+        x1s, y1s = s(r["x1"]), s(r["y1"])
+        x2s, y2s = s(r["x2"]), s(r["y2"])
+        draw.rectangle([x1s-2, y1s-2, x2s+2, y2s+2],
+                       outline=(255,255,255), width=3)
+        draw.rectangle([x1s, y1s, x2s, y2s],
+                       outline=(0,140,255), width=2)
+        lx, ly = x1s, max(0, y1s-16)
+        draw.rectangle([lx, ly, lx+18, ly+15], fill=(0,140,255))
+        draw.text((lx+2, ly+1), str(r["idx"]), fill=(255,255,255))
 
     buf = io.BytesIO()
-    annotated.save(buf, format='PNG')
+    ann.convert('RGB').save(buf, format='JPEG', quality=88, optimize=True)
+    print(f"  [preprocess] 標記圖：{buf.tell()//1024} KB")
     ann_b64 = base64.standard_b64encode(buf.getvalue()).decode()
 
     return regions, ann_b64
+
+
+def pdf_first_page_thumbnail(pdf_path: str, max_w: int = 800) -> str | None:
+    """PDF 第一頁縮圖，用於上傳即時預覽"""
+    try:
+        import fitz
+        doc  = fitz.open(pdf_path)
+        page = doc[0]
+        mat  = fitz.Matrix(100/72, 100/72)
+        pix  = page.get_pixmap(matrix=mat, alpha=False)
+        img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        doc.close()
+        if img.width > max_w:
+            ratio = max_w / img.width
+            img = img.resize((max_w, int(img.height*ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=82)
+        b64 = base64.standard_b64encode(buf.getvalue()).decode()
+        return "data:image/jpeg;base64," + b64
+    except Exception as e:
+        print(f"  [thumbnail] 失敗：{e}")
+        return None

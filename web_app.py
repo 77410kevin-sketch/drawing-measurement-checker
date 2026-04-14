@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from analyzer import analyze_drawing_image, analyze_multiple_images
 from pdf_converter import pdf_to_images, cleanup_temp_images
+from preprocess import pdf_first_page_thumbnail
 import db
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +43,22 @@ async def startup():
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.post("/api/thumbnail")
+async def get_thumbnail(file: UploadFile = File(...)):
+    """PDF 上傳後即時取得第一頁縮圖（用於預覽）"""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext != ".pdf":
+        return JSONResponse({"thumbnail": None})
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    try:
+        thumb = pdf_first_page_thumbnail(tmp_path, max_w=800)
+        return JSONResponse({"thumbnail": thumb})
+    finally:
+        os.unlink(tmp_path)
 
 
 @app.post("/api/analyze")
@@ -73,7 +90,7 @@ async def analyze(
 
     try:
         if ext == ".pdf":
-            temp_images = pdf_to_images(tmp_path, dpi=180)
+            temp_images = pdf_to_images(tmp_path, dpi=250)
             if not temp_images:
                 raise HTTPException(status_code=400, detail="PDF 轉換失敗")
 
@@ -112,13 +129,20 @@ async def analyze(
         if temp_images:
             cleanup_temp_images(temp_images)
 
-    return JSONResponse({
+    dims = data.get("dimensions", [])
+    resp = {
         "success": True,
         "preview": preview_b64,
         "part_name": data.get("part_name", "Unknown"),
         "drawing_no": data.get("drawing_no", "N/A"),
-        "dimensions": data.get("dimensions", []),
-    })
+        "has_yellow_marks": data.get("has_yellow_marks", False),
+        "dimensions": dims,
+    }
+    # 若 0 項且有 parse error，把提示帶給前端
+    if len(dims) == 0 and data.get("_parse_error"):
+        resp["_warn"] = f"AI 回應解析失敗，請重新上傳或確認圖面清晰度。原始片段：{data.get('_raw','')[:100]}"
+
+    return JSONResponse(resp)
 
 
 # ── 檢表儲存 CRUD ─────────────────────────────────────

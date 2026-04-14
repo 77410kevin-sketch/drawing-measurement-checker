@@ -98,12 +98,11 @@ def _parse_json_response(text: str) -> dict | None:
 
 
 def _call_claude(client, system: str, image_b64: str, media_type: str,
-                 user_text: str) -> str:
+                 user_text: str, use_thinking: bool = False) -> str:
     """呼叫 Claude Vision 並回傳文字回應"""
-    with client.messages.stream(
+    kwargs = dict(
         model="claude-opus-4-6",
-        max_tokens=8192,
-        thinking={"type": "adaptive"},
+        max_tokens=16000,
         system=system,
         messages=[{
             "role": "user",
@@ -115,9 +114,19 @@ def _call_claude(client, system: str, image_b64: str, media_type: str,
                 {"type": "text", "text": user_text},
             ],
         }],
-    ) as stream:
+    )
+    if use_thinking:
+        kwargs["thinking"] = {"type": "adaptive"}
+
+    with client.messages.stream(**kwargs) as stream:
         msg = stream.get_final_message()
-    return next((b.text for b in msg.content if b.type == "text"), "")
+
+    text = next((b.text for b in msg.content if b.type == "text"), "")
+    if not text:
+        # 若無 text block，印出所有 block 類型供 debug
+        types = [getattr(b, 'type', '?') for b in msg.content]
+        print(f"  ⚠️  回應無 text block，block types: {types}")
+    return text
 
 
 def analyze_drawing_image(image_path: str, api_key: str = None) -> dict:
@@ -147,7 +156,9 @@ def analyze_drawing_image(image_path: str, api_key: str = None) -> dict:
             f"同時請從標題欄讀取零件名稱與圖號。\n"
             f"輸出純 JSON，dimensions 陣列共 {len(regions)} 筆，順序與框號一致。"
         )
-        text_resp = _call_claude(client, SYSTEM_ORANGE, ann_data, "image/png", user_text)
+        # orange 分析：純讀框文字，不需要 thinking
+        text_resp = _call_claude(client, SYSTEM_ORANGE, ann_data, "image/jpeg",
+                                 user_text, use_thinking=False)
 
     else:
         print("  → 未偵測到橙色標記，分析全部尺寸")
@@ -158,7 +169,8 @@ def analyze_drawing_image(image_path: str, api_key: str = None) -> dict:
             "估算每個尺寸的位置（x, y 百分比）。\n"
             "輸出純 JSON。"
         )
-        text_resp = _call_claude(client, SYSTEM_ALL, orig_data, media_type, user_text)
+        text_resp = _call_claude(client, SYSTEM_ALL, orig_data, media_type,
+                                 user_text, use_thinking=True)
 
     print(f"  → 回應長度：{len(text_resp)} 字元")
     if len(text_resp) < 200:
@@ -186,8 +198,14 @@ def analyze_drawing_image(image_path: str, api_key: str = None) -> dict:
         for i, dim in enumerate(dims):
             if i < len(regions):
                 r = regions[i]
-                dim["x"] = r["cx"]
-                dim["y"] = r["cy"]
+                # 傳入完整的邊框百分比座標，讓前端精確定位
+                dim["x"]    = r["cx"]
+                dim["y"]    = r["cy"]
+                dim["x1p"]  = r["x1p"]
+                dim["y1p"]  = r["y1p"]
+                dim["x2p"]  = r["x2p"]
+                dim["y2p"]  = r["y2p"]
+                dim["orientation"] = r.get("orientation", "h")
             dim.setdefault("item_no", i + 1)
     else:
         for i, dim in enumerate(dims):
@@ -223,7 +241,7 @@ def analyze_multiple_images(image_paths: list, api_key: str = None) -> dict:
 
     with client.messages.stream(
         model="claude-opus-4-6",
-        max_tokens=8192,
+        max_tokens=16000,
         thinking={"type": "adaptive"},
         system=SYSTEM_ALL,
         messages=[{"role": "user", "content": content}],
