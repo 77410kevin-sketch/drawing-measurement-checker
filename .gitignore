@@ -1,0 +1,11 @@
+# 資料庫與上傳暫存
+checklists.db
+__pycache__/
+*.pyc
+*.pyo
+
+# 環境變數（含 API Key，不能上傳）
+.env
+
+# macOS
+.DS_Store
