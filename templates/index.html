@@ -866,30 +866,31 @@ function renderTable(dims) {
   updateStats();
 }
 
-// ── 公差手動輸入 ─────────────────────────────────────
+// ── 從 DOM 直接讀取該列的公差上下界 ─────────────────────
+function _getBounds(row, tr) {
+  const nomStr = tr?.dataset.nominal || tr?.querySelector('.nom-input')?.value || '';
+  const nom    = nomStr !== '' ? parseFloat(nomStr) : null;
+  const uInp   = document.querySelector(`.tol-input[data-row="${row}"][data-sign="upper"]`);
+  const lInp   = document.querySelector(`.tol-input[data-row="${row}"][data-sign="lower"]`);
+  const utol   = uInp?.value.trim()  !== '' ? parseFloat(uInp.value)  : null;
+  const ltolR  = lInp?.value.trim()  !== '' ? parseFloat(lInp.value)  : null;
+  const ltol   = ltolR != null ? -Math.abs(ltolR) : null;   // 下公差強制負值
+  return {
+    upper: (nom != null && utol != null) ? nom + utol : null,
+    lower: (nom != null && ltol != null) ? nom + ltol : null,
+  };
+}
+
+// ── 公差欄位改變 → 重新評估同行所有量測格 ───────────────
 function onTolInput(inp) {
   if (!inp) return;
   const row = parseInt(inp.dataset.row);
-  // 先從 tr.dataset.nominal 取（AI 列），再從 .nom-input 取（手動列）
-  const tr = inp.closest('tr');
-  const nomStr = tr?.dataset.nominal || tr?.querySelector('.nom-input')?.value || '';
-  const nom = nomStr !== '' ? parseFloat(nomStr) : null;
-
-  const upperInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="upper"]`);
-  const lowerInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="lower"]`);
-  const utol = upperInp?.value.trim() !== '' ? parseFloat(upperInp.value) : null;
-  // 下公差強制為負值（用戶輸入 0.2 或 -0.2 均視為 -0.2）
-  const ltolRaw = lowerInp?.value.trim() !== '' ? parseFloat(lowerInp.value) : null;
-  const ltol    = ltolRaw != null ? -Math.abs(ltolRaw) : null;
-  const newUpper = (nom != null && utol != null) ? String(nom + utol) : '';
-  const newLower = (nom != null && ltol != null) ? String(nom + ltol) : '';
-
-  // 更新同行所有量測格的公差邊界，並重新判色
   document.querySelectorAll(`.meas-input[data-row="${row}"]`).forEach(mi => {
-    mi.dataset.upper = newUpper;
-    mi.dataset.lower = newLower;
-    if (mi.value.trim() !== '') onInput(mi);
+    mi.classList.remove('out', 'ok');
+    if (mi.value.trim() !== '') _applyColor(mi);
   });
+  updateRowVerdict(row);
+  updateStats();
 }
 
 // ── Enter 往右移動 + 禁止方向鍵調整數字 ──────────────
@@ -917,31 +918,37 @@ document.addEventListener('keydown', function(e) {
   }
 }, true);
 
-// ── 量測輸入 ─────────────────────────────────────────
-function onInput(inp) {
-  const upper = inp.dataset.upper !== '' ? parseFloat(inp.dataset.upper) : null;
-  const lower = inp.dataset.lower !== '' ? parseFloat(inp.dataset.lower) : null;
-  const val   = inp.value.trim() !== '' ? parseFloat(inp.value) : null;
-
-  inp.classList.remove('out','ok');
+// ── 量測輸入：每次直接從公差輸入框讀取當前上下界 ────────
+function _applyColor(inp) {
+  const row  = parseInt(inp.dataset.row);
+  const tr   = inp.closest('tr');
+  const {upper, lower} = _getBounds(row, tr);
+  const val  = inp.value.trim() !== '' ? parseFloat(inp.value) : null;
+  inp.classList.remove('out', 'ok');
   if (val !== null && upper !== null && lower !== null) {
     inp.classList.add(val > upper || val < lower ? 'out' : 'ok');
   }
+}
+
+function onInput(inp) {
+  _applyColor(inp);
   updateRowVerdict(parseInt(inp.dataset.row));
   updateStats();
 }
 
 function updateRowVerdict(idx) {
-  const inputs  = document.querySelectorAll(`.meas-input[data-row="${idx}"]`);
-  const cell    = document.getElementById(`verdict-${idx}`);
-  const filled  = [...inputs].filter(i => i.value.trim() !== '');
+  const inputs = document.querySelectorAll(`.meas-input[data-row="${idx}"]`);
+  const cell   = document.getElementById(`verdict-${idx}`);
+  if (!cell) return;
+  const filled = [...inputs].filter(i => i.value.trim() !== '');
   if (!filled.length) { cell.innerHTML = '<span class="badge-pending">待量測</span>'; return; }
 
-  const upper = inputs[0].dataset.upper !== '' ? parseFloat(inputs[0].dataset.upper) : null;
-  const lower = inputs[0].dataset.lower !== '' ? parseFloat(inputs[0].dataset.lower) : null;
+  // 直接從公差 input 讀取最新值
+  const tr = inputs[0]?.closest('tr');
+  const {upper, lower} = _getBounds(idx, tr);
 
   if (upper !== null && lower !== null) {
-    const ng = filled.some(i => { const v=parseFloat(i.value); return isNaN(v)||v>upper||v<lower; });
+    const ng = filled.some(i => { const v = parseFloat(i.value); return isNaN(v) || v > upper || v < lower; });
     cell.innerHTML = ng
       ? '<span class="badge-fail">✕ NG</span>'
       : '<span class="badge-pass">✓ OK</span>';
