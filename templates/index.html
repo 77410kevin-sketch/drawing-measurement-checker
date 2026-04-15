@@ -243,6 +243,8 @@ body {
 }
 .btn-export { background:#16a34a; color:#fff; border:none; border-radius:7px; padding:7px 18px; font-weight:700; font-size:.82rem; cursor:pointer; transition:.2s; }
 .btn-export:hover { background:#15803d; }
+.btn-pdf { background:#dc2626; color:#fff; border:none; border-radius:7px; padding:7px 18px; font-weight:700; font-size:.82rem; cursor:pointer; transition:.2s; }
+.btn-pdf:hover { background:#b91c1c; }
 .btn-reset { background:transparent; color:#64748b; border:1.5px solid var(--border); border-radius:7px; padding:7px 14px; font-size:.82rem; cursor:pointer; transition:.2s; }
 .btn-reset:hover { border-color:#94a3b8; color:#1e293b; }
 .btn-save { background:#7c3aed; color:#fff; border:none; border-radius:7px; padding:7px 18px; font-weight:700; font-size:.82rem; cursor:pointer; transition:.2s; }
@@ -480,6 +482,9 @@ body {
         <div class="toolbar">
           <button class="btn-export" onclick="exportExcel()">
             <i class="bi bi-file-earmark-excel me-1"></i>匯出 Excel
+          </button>
+          <button class="btn-pdf" onclick="exportPDF()">
+            <i class="bi bi-file-earmark-pdf me-1"></i>匯出 PDF
           </button>
           <button class="btn-save" onclick="saveChecklist()">
             <i class="bi bi-archive me-1"></i>儲存檢表
@@ -960,6 +965,136 @@ function exportExcel() {
   XLSX.utils.book_append_sheet(wb, ws, '量測檢表');
   const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
   XLSX.writeFile(wb, `量測檢表_${(part||'drawing').replace(/[/\\:*?"<>|]/g,'_')}_${ts}.xlsx`);
+}
+
+// ── 匯出 PDF（新頁籤，含球標圖面 + 檢表）────────────────
+function exportPDF() {
+  if (!currentData) return;
+
+  const part     = document.getElementById('res-part').value || '未命名';
+  const drawNo   = document.getElementById('res-no').value || 'N/A';
+  const internal = document.getElementById('res-internal').value || '';
+  const date     = document.getElementById('res-date').textContent;
+  const imgSrc   = document.getElementById('drawing-img').src || '';
+  const dims     = currentData.dimensions || [];
+
+  // ── 球標 HTML ─────────────────────────────────────
+  const balloonHTML = balloonData.map(b => {
+    let style = '';
+    if (b.orientation === 'v') {
+      style = `left:${b.cx}%;top:${b.y2p}%;transform:translate(-50%,3px)`;
+    } else {
+      style = `left:${b.x1p}%;top:${b.cy}%;transform:translate(calc(-100% - 3px),-50%)`;
+    }
+    return `<div class="bp" style="${style}">${b.item_no}</div>`;
+  }).join('');
+
+  // ── 表格列 HTML ───────────────────────────────────
+  const rowsHTML = dims.map((dim, idx) => {
+    const uInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="upper"]`);
+    const lInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="lower"]`);
+    const utolVal = uInp?.value.trim() !== '' ? `+${parseFloat(uInp.value)}` : '—';
+    const ltolVal = lInp?.value.trim() !== '' ? `${parseFloat(lInp.value)}` : '—';
+    const tool    = document.querySelector(`.tool-select[data-row="${idx}"]`)?.value || '';
+    const meas    = [1,2,3,4,5].map(n => {
+      const v = document.querySelector(`.meas-input[data-row="${idx}"][data-col="${n}"]`)?.value.trim() || '';
+      return `<td>${v || ''}</td>`;
+    }).join('');
+    const verdictEl = document.getElementById(`verdict-${idx}`)?.querySelector('[class^="badge-"]');
+    const verdict   = verdictEl?.textContent.trim() || '待量測';
+    const vStyle    = verdict.includes('OK') ? 'color:#15803d;font-weight:800'
+                    : verdict.includes('NG') ? 'color:#b91c1c;font-weight:800'
+                    : 'color:#92400e';
+    return `<tr>
+      <td>${dim.item_no ?? idx+1}</td>
+      <td style="text-align:left;padding-left:6px">${dim.name || ''}</td>
+      <td>${dim.nominal ?? '—'} <span style="color:#94a3b8;font-size:.75em">${dim.unit||'mm'}</span></td>
+      <td style="color:#059669;font-weight:700">${utolVal}</td>
+      <td style="color:#dc2626;font-weight:700">${ltolVal}</td>
+      <td>${tool}</td>
+      ${meas}
+      <td style="${vStyle}">${verdict}</td>
+    </tr>`;
+  }).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>量測檢表 - ${part}</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family:"Microsoft JhengHei","微軟正黑體",Arial,sans-serif; font-size:11px; background:#fff; color:#1e293b; }
+.page { padding:12mm 10mm; }
+h2 { font-size:15px; font-weight:800; margin-bottom:8px; color:#0d2137; }
+.meta { display:flex; gap:24px; flex-wrap:wrap; margin-bottom:10px; font-size:10.5px; }
+.meta b { color:#475569; }
+/* 圖面 */
+.drawing-wrap { position:relative; line-height:0; border:1px solid #cbd5e1; border-radius:4px; overflow:hidden; margin-bottom:12px; }
+.drawing-wrap img { width:100%; height:auto; display:block; }
+.bl { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+.bp {
+  position:absolute; width:18px; height:18px;
+  background:#e53e3e; border:2px solid #fff; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  color:#fff; font-weight:800; font-size:8px; line-height:1;
+  box-shadow:0 1px 4px rgba(0,0,0,.55);
+}
+/* 表格 */
+table { width:100%; border-collapse:collapse; font-size:10px; }
+th { background:#1a3d5c; color:#fff; text-align:center; padding:5px 3px; border:1px solid #1e4f7a; font-weight:700; }
+td { border:1px solid #dde5ef; padding:4px 3px; text-align:center; vertical-align:middle; }
+td:nth-child(2) { text-align:left; padding-left:5px; }
+tr:nth-child(even) td { background:#f7fbff; }
+.sec-th { background:#1a4a72; color:#b8d4ee; font-size:9px; }
+@media print {
+  @page { margin:8mm; size:A4 landscape; }
+  body { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <h2>圖面識別量測檢表</h2>
+  <div class="meta">
+    <span><b>零件名稱：</b>${part}</span>
+    <span><b>圖號：</b>${drawNo}</span>
+    ${internal ? `<span><b>廠內料號：</b>${internal}</span>` : ''}
+    <span><b>檢驗日期：</b>${date}</span>
+  </div>
+  ${imgSrc ? `<div class="drawing-wrap"><img src="${imgSrc}" alt="drawing"><div class="bl">${balloonHTML}</div></div>` : ''}
+  <table>
+    <thead>
+      <tr>
+        <th rowspan="2" style="width:28px">#</th>
+        <th rowspan="2" style="min-width:120px">量測項目</th>
+        <th rowspan="2">標稱值</th>
+        <th colspan="2">公差</th>
+        <th rowspan="2" style="width:48px">量測工具</th>
+        <th colspan="5">量測結果（5 次）</th>
+        <th rowspan="2">判定</th>
+      </tr>
+      <tr>
+        <th class="sec-th">+</th><th class="sec-th">−</th>
+        <th class="sec-th">M1</th><th class="sec-th">M2</th>
+        <th class="sec-th">M3</th><th class="sec-th">M4</th><th class="sec-th">M5</th>
+      </tr>
+    </thead>
+    <tbody>${rowsHTML}</tbody>
+  </table>
+</div>
+<script>
+  window.onload = function() {
+    setTimeout(function(){ window.print(); }, 400);
+  };
+<\/script>
+</body>
+</html>`;
+
+  const w = window.open('', '_blank');
+  if (!w) { alert('請允許瀏覽器開啟新分頁'); return; }
+  w.document.write(html);
+  w.document.close();
 }
 
 // ── 重置 ─────────────────────────────────────────────
