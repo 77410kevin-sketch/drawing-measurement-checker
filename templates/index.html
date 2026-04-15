@@ -211,6 +211,16 @@ body {
 }
 .tool-select:focus { border-color:var(--blue-acc); background:#fff; }
 
+/* 公差手動輸入 */
+.tol-input {
+  width:50px; border:1.5px solid #bfd4e8; border-radius:5px;
+  padding:2px 3px; text-align:center; font-size:.76rem;
+  background:#f7fff2; transition:.2s; outline:none;
+}
+.tol-input:focus { border-color:var(--blue-acc); background:#fff; }
+.tol-input.tol-pos { color:#059669; font-weight:700; }
+.tol-input.tol-neg { color:#dc2626; font-weight:700; }
+
 /* 量測輸入 */
 .meas-input {
   width:62px; border:1.5px solid #bfd4e8; border-radius:5px;
@@ -778,8 +788,14 @@ function renderTable(dims) {
       <td>${dim.item_no ?? idx+1}</td>
       <td class="name-col" title="${dim.note || ''}">${dim.name || ''}</td>
       <td>${nomDisplay}</td>
-      <td class="tol-pos">${utol != null ? '+'+fmtN(utol) : '—'}</td>
-      <td class="tol-neg">${ltol != null ? fmtN(ltol) : '—'}</td>
+      <td><input type="number" step="any" class="tol-input tol-pos"
+        data-row="${idx}" data-sign="upper"
+        value="${utol != null ? utol : ''}" placeholder="—"
+        oninput="onTolInput(this)"></td>
+      <td><input type="number" step="any" class="tol-input tol-neg"
+        data-row="${idx}" data-sign="lower"
+        value="${ltol != null ? ltol : ''}" placeholder="—"
+        oninput="onTolInput(this)"></td>
       <td>
         <select class="tool-select" data-row="${idx}">
           <option value="">— 選擇 —</option>
@@ -796,6 +812,53 @@ function renderTable(dims) {
   });
   updateStats();
 }
+
+// ── 公差手動輸入 ─────────────────────────────────────
+function onTolInput(inp) {
+  const row = parseInt(inp.dataset.row);
+  const dims = currentData?.dimensions || [];
+  const nomVal = dims[row]?.nominal;
+  const nom = nomVal != null ? parseFloat(nomVal) : null;
+
+  const upperInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="upper"]`);
+  const lowerInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="lower"]`);
+  const utol = upperInp?.value.trim() !== '' ? parseFloat(upperInp.value) : null;
+  const ltol = lowerInp?.value.trim() !== '' ? parseFloat(lowerInp.value) : null;
+  const newUpper = (nom != null && utol != null) ? String(nom + utol) : '';
+  const newLower = (nom != null && ltol != null) ? String(nom + ltol) : '';
+
+  // 更新同行所有量測格的公差邊界，並重新判色
+  document.querySelectorAll(`.meas-input[data-row="${row}"]`).forEach(mi => {
+    mi.dataset.upper = newUpper;
+    mi.dataset.lower = newLower;
+    if (mi.value.trim() !== '') onInput(mi);
+  });
+}
+
+// ── Enter 往右移動 + 禁止方向鍵調整數字 ──────────────
+document.addEventListener('keydown', function(e) {
+  const inp = e.target;
+  const isMeas = inp.classList.contains('meas-input');
+  const isTol  = inp.classList.contains('tol-input');
+  if (!isMeas && !isTol) return;
+
+  // 禁止 ↑↓ 調整數字
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    e.preventDefault();
+    return;
+  }
+
+  // Enter → 移到右側下一個量測格
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const allMeas = [...document.querySelectorAll('#table-body .meas-input')];
+    const idx = allMeas.indexOf(inp);
+    if (idx !== -1 && idx < allMeas.length - 1) {
+      allMeas[idx + 1].focus();
+      allMeas[idx + 1].select();
+    }
+  }
+}, true);
 
 // ── 量測輸入 ─────────────────────────────────────────
 function onInput(inp) {
@@ -877,8 +940,10 @@ function exportExcel() {
     [],
     ['#','量測項目','標稱值','單位','公差(+)','公差(-)','量測工具','M1','M2','M3','M4','M5','判定'],
     ...dims.map((dim,idx) => {
-      const utol = dim.upper_tol != null ? `+${dim.upper_tol}` : '';
-      const ltol = dim.lower_tol != null ? `${dim.lower_tol}` : '';
+      const uInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="upper"]`);
+      const lInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="lower"]`);
+      const utol = uInp?.value.trim() !== '' ? `+${uInp.value}` : '';
+      const ltol = lInp?.value.trim() !== '' ? `${lInp.value}` : '';
       const tool = document.querySelector(`.tool-select[data-row="${idx}"]`)?.value || '';
       const meas = [...document.querySelectorAll(`.meas-input[data-row="${idx}"]`)]
                      .map(i => i.value.trim() !== '' ? parseFloat(i.value) : '');
