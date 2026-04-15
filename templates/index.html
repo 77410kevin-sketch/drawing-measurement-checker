@@ -846,7 +846,8 @@ function renderTable(dims) {
       <td><input type="number" step="any" class="tol-input tol-neg"
         data-row="${idx}" data-sign="lower"
         value="${ltol != null ? ltol : ''}" placeholder="—"
-        oninput="onTolInput(this)"></td>
+        oninput="onTolInput(this)"
+        onblur="if(parseFloat(this.value)>0){this.value='-'+parseFloat(this.value);onTolInput(this);}"></td>
       <td>
         <select class="tool-select" data-row="${idx}">
           <option value="">— 選擇 —</option>
@@ -877,7 +878,9 @@ function onTolInput(inp) {
   const upperInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="upper"]`);
   const lowerInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="lower"]`);
   const utol = upperInp?.value.trim() !== '' ? parseFloat(upperInp.value) : null;
-  const ltol = lowerInp?.value.trim() !== '' ? parseFloat(lowerInp.value) : null;
+  // 下公差強制為負值（用戶輸入 0.2 或 -0.2 均視為 -0.2）
+  const ltolRaw = lowerInp?.value.trim() !== '' ? parseFloat(lowerInp.value) : null;
+  const ltol    = ltolRaw != null ? -Math.abs(ltolRaw) : null;
   const newUpper = (nom != null && utol != null) ? String(nom + utol) : '';
   const newLower = (nom != null && ltol != null) ? String(nom + ltol) : '';
 
@@ -1048,7 +1051,8 @@ function addRow() {
       oninput="onTolInput(this)"></td>
     <td><input type="number" step="any" class="tol-input tol-neg"
       data-row="${dataRow}" data-sign="lower" value="" placeholder="—"
-      oninput="onTolInput(this)"></td>
+      oninput="onTolInput(this)"
+      onblur="if(parseFloat(this.value)>0){this.value='-'+parseFloat(this.value);onTolInput(this);}"></td>
     <td>
       <select class="tool-select" data-row="${dataRow}">
         <option value="">— 選擇 —</option>
@@ -1093,10 +1097,11 @@ function collectTableRows() {
     const nominal = tr.dataset.nominal || '';
     const unit    = tr.dataset.unit    || 'mm';
     // 公差
-    const uInp  = tr.querySelector('.tol-input[data-sign="upper"]');
-    const lInp  = tr.querySelector('.tol-input[data-sign="lower"]');
-    const utol  = uInp?.value.trim() !== '' ? parseFloat(uInp.value) : null;
-    const ltol  = lInp?.value.trim() !== '' ? parseFloat(lInp.value) : null;
+    const uInp    = tr.querySelector('.tol-input[data-sign="upper"]');
+    const lInp    = tr.querySelector('.tol-input[data-sign="lower"]');
+    const utol    = uInp?.value.trim() !== '' ? parseFloat(uInp.value) : null;
+    const ltolRaw = lInp?.value.trim() !== '' ? parseFloat(lInp.value) : null;
+    const ltol    = ltolRaw != null ? -Math.abs(ltolRaw) : null;  // 強制負值
     // 工具
     const tool = tr.querySelector('.tool-select')?.value || '';
     // 量測值
