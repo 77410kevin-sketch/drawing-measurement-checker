@@ -424,8 +424,8 @@ body {
           <input class="info-input" id="res-part" style="width:160px">
         </div>
         <div class="info-field">
-          <span class="info-label">圖號</span>
-          <input class="info-input" id="res-no" style="width:120px">
+          <span class="info-label">量測人員</span>
+          <input class="info-input" id="res-inspector" placeholder="請輸入" style="width:110px">
         </div>
         <div class="info-field">
           <span class="info-label">廠內料號</span>
@@ -478,6 +478,16 @@ body {
             </thead>
             <tbody id="table-body"></tbody>
           </table>
+        </div>
+        <!-- 備注 -->
+        <div style="padding:10px 16px 0;border-top:1px solid var(--border)">
+          <div style="display:flex;align-items:flex-start;gap:8px">
+            <span style="font-size:.75rem;font-weight:700;color:#fff;background:var(--blue-mid);border-radius:4px;padding:3px 8px;white-space:nowrap;margin-top:3px">備　注</span>
+            <textarea id="res-remark" rows="2" placeholder="請輸入備注…"
+              style="flex:1;border:1.5px solid #cbd5e1;border-radius:6px;padding:5px 9px;font-size:.82rem;font-family:inherit;resize:vertical;outline:none;min-height:54px"
+              onfocus="this.style.borderColor='var(--blue-acc)'"
+              onblur="this.style.borderColor='#cbd5e1'"></textarea>
+          </div>
         </div>
         <div class="toolbar">
           <button class="btn-export" onclick="exportExcel()">
@@ -734,9 +744,10 @@ function renderResult(data) {
   }
 
   // 資訊
-  document.getElementById('res-part').value = data.part_name || '';
-  document.getElementById('res-no').value   = data.drawing_no || '';
-  document.getElementById('res-internal').value = '';
+  document.getElementById('res-part').value      = data.part_name || '';
+  document.getElementById('res-inspector').value = '';
+  document.getElementById('res-internal').value  = '';
+  document.getElementById('res-remark').value    = '';
 
   // 表格
   const dims = data.dimensions || [];
@@ -933,15 +944,16 @@ function toggleDrawing() {
 // ── 匯出 Excel ────────────────────────────────────────
 function exportExcel() {
   if (!currentData) return;
-  const dims  = currentData.dimensions || [];
-  const part  = document.getElementById('res-part').value;
-  const drawNo = document.getElementById('res-no').value;
-  const internal = document.getElementById('res-internal').value;
-  const date  = document.getElementById('res-date').textContent;
+  const dims      = currentData.dimensions || [];
+  const part      = document.getElementById('res-part').value;
+  const inspector = document.getElementById('res-inspector').value;
+  const internal  = document.getElementById('res-internal').value;
+  const date      = document.getElementById('res-date').textContent;
+  const remark    = document.getElementById('res-remark').value;
 
   const wsData = [
-    ['零件名稱', part, '圖號', drawNo, '廠內料號', internal],
-    ['檢驗日期', date, '操作人員', '', '量測儀器', ''],
+    ['零件名稱', part, '量測人員', inspector, '廠內料號', internal],
+    ['檢驗日期', date, '備注', remark, '', ''],
     [],
     ['#','量測項目','標稱值','單位','公差(+)','公差(-)','量測工具','M1','M2','M3','M4','M5','判定'],
     ...dims.map((dim,idx) => {
@@ -971,10 +983,11 @@ function exportExcel() {
 function exportPDF() {
   if (!currentData) return;
 
-  const part     = document.getElementById('res-part').value || '未命名';
-  const drawNo   = document.getElementById('res-no').value || 'N/A';
-  const internal = document.getElementById('res-internal').value || '';
-  const date     = document.getElementById('res-date').textContent;
+  const part      = document.getElementById('res-part').value || '未命名';
+  const inspector = document.getElementById('res-inspector').value || '';
+  const internal  = document.getElementById('res-internal').value || '';
+  const date      = document.getElementById('res-date').textContent;
+  const remark    = document.getElementById('res-remark').value || '';
   const imgSrc   = document.getElementById('drawing-img').src || '';
   const dims     = currentData.dimensions || [];
 
@@ -1058,7 +1071,7 @@ tr:nth-child(even) td { background:#f7fbff; }
   <h2>圖面識別量測檢表</h2>
   <div class="meta">
     <span><b>零件名稱：</b>${part}</span>
-    <span><b>圖號：</b>${drawNo}</span>
+    ${inspector ? `<span><b>量測人員：</b>${inspector}</span>` : ''}
     ${internal ? `<span><b>廠內料號：</b>${internal}</span>` : ''}
     <span><b>檢驗日期：</b>${date}</span>
   </div>
@@ -1082,6 +1095,7 @@ tr:nth-child(even) td { background:#f7fbff; }
     </thead>
     <tbody>${rowsHTML}</tbody>
   </table>
+  ${remark ? `<div style="margin-top:10px;font-size:10.5px"><b>備注：</b>${remark.replace(/\n/g,'<br>')}</div>` : ''}
 </div>
 <script>
   window.onload = function() {
@@ -1112,10 +1126,11 @@ function resetAll() {
 // ── 儲存檢表 ─────────────────────────────────────────
 async function saveChecklist() {
   if (!currentData) return alert('請先分析或載入一份檢表');
-  const part     = document.getElementById('res-part').value.trim() || '未命名';
-  const drawNo   = document.getElementById('res-no').value.trim();
-  const internal = document.getElementById('res-internal').value.trim();
-  const preview  = document.getElementById('drawing-img').src || '';
+  const part      = document.getElementById('res-part').value.trim() || '未命名';
+  const inspector = document.getElementById('res-inspector').value.trim();
+  const internal  = document.getElementById('res-internal').value.trim();
+  const remark    = document.getElementById('res-remark').value.trim();
+  const preview   = document.getElementById('drawing-img').src || '';
 
   // 收集工具選擇
   const tools = {};
@@ -1124,10 +1139,10 @@ async function saveChecklist() {
   });
 
   const body = {
-    part_name: part,
-    drawing_no: drawNo,
+    part_name:   part,
+    drawing_no:  inspector,   // 欄位沿用 drawing_no 儲存量測人員
     internal_no: internal,
-    dimensions: currentData.dimensions || [],
+    dimensions:  currentData.dimensions || [],
     tools,
     preview: preview.startsWith('data:') ? preview : '',
   };
@@ -1232,8 +1247,10 @@ async function loadChecklist(id) {
     // 還原球標
     renderBalloons(row.dimensions || []);
 
-    // 還原廠內料號
-    document.getElementById('res-internal').value = row.internal_no || '';
+    // 還原廠內料號與量測人員
+    document.getElementById('res-internal').value  = row.internal_no || '';
+    document.getElementById('res-inspector').value = row.drawing_no  || '';
+    document.getElementById('res-remark').value    = '';
 
     // 關閉面板
     bootstrap.Offcanvas.getInstance(
