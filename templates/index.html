@@ -236,6 +236,27 @@ body {
 .badge-fail    { background:#fee2e2; color:#b91c1c; font-weight:800; font-size:.74rem; padding:3px 9px; border-radius:20px; border:1.5px solid #fca5a5; white-space:nowrap; }
 .badge-pending { background:#fef9c3; color:#92400e; font-weight:700; font-size:.72rem; padding:3px 9px; border-radius:20px; border:1.5px solid #fde68a; white-space:nowrap; }
 
+/* 刪除列按鈕 */
+.btn-del-row {
+  background:transparent; border:none; color:#ef4444;
+  cursor:pointer; font-size:.85rem; padding:2px 5px;
+  border-radius:4px; line-height:1; transition:.15s;
+}
+.btn-del-row:hover { background:#fee2e2; }
+
+/* 手動新增列的名稱/標稱輸入 */
+.name-input {
+  border:none; background:transparent; width:100%;
+  font-size:.78rem; outline:none; font-family:inherit; color:#1e293b;
+}
+.name-input::placeholder { color:#94a3b8; }
+.nom-input {
+  width:60px; border:1.5px solid #bfd4e8; border-radius:5px;
+  padding:2px 4px; text-align:center; font-size:.76rem;
+  background:#f0f8ff; outline:none;
+}
+.nom-input:focus { border-color:var(--blue-acc); background:#fff; }
+
 /* toolbar */
 .toolbar {
   background:#f8fafc; border-top:1px solid var(--border);
@@ -470,6 +491,7 @@ body {
                 <th rowspan="2" style="min-width:88px">量測工具</th>
                 <th colspan="5">量測結果（5 次）</th>
                 <th rowspan="2">判定</th>
+                <th rowspan="2" style="width:28px"></th>
               </tr>
               <tr>
                 <th>+</th><th>−</th>
@@ -490,6 +512,11 @@ body {
           </div>
         </div>
         <div class="toolbar">
+          <button class="btn-add-row" onclick="addRow()" id="add-row-btn"
+            style="background:#0891b2;color:#fff;border:none;border-radius:7px;padding:7px 16px;font-weight:700;font-size:.82rem;cursor:pointer;transition:.2s"
+            onmouseover="this.style.background='#0e7490'" onmouseout="this.style.background='#0891b2'">
+            <i class="bi bi-plus-lg me-1"></i>新增量測項目
+          </button>
           <button class="btn-export" onclick="exportExcel()">
             <i class="bi bi-file-earmark-excel me-1"></i>匯出 Excel
           </button>
@@ -769,9 +796,15 @@ function renderResult(data) {
   showSection('result-section');
 }
 
+let nextRowIdx   = 0;   // 下一個可用的 data-row 索引
+let extraRowCount = 0;  // 手動新增列數
+const MAX_EXTRA   = 10;
+
 function renderTable(dims) {
   const tbody = document.getElementById('table-body');
   tbody.innerHTML = '';
+  nextRowIdx    = dims.length;
+  extraRowCount = 0;
   document.getElementById('stat-total').textContent   = dims.length;
   document.getElementById('stat-pass').textContent    = 0;
   document.getElementById('stat-fail').textContent    = 0;
@@ -790,7 +823,9 @@ function renderTable(dims) {
       ? `${dim.nominal} <small style="color:#94a3b8;font-size:.7em">${unit}</small>` : '—';
 
     const tr = document.createElement('tr');
-    tr.dataset.idx = idx;
+    tr.dataset.idx     = idx;
+    tr.dataset.nominal = dim.nominal ?? '';
+    tr.dataset.unit    = dim.unit    || 'mm';
 
     const measCells = [1,2,3,4,5].map(n => `
       <td>
@@ -823,6 +858,7 @@ function renderTable(dims) {
       </td>
       ${measCells}
       <td id="verdict-${idx}"><span class="badge-pending">待量測</span></td>
+      <td><button class="btn-del-row" onclick="deleteRow(this)" title="刪除此列">✕</button></td>
     `;
     tbody.appendChild(tr);
   });
@@ -831,10 +867,12 @@ function renderTable(dims) {
 
 // ── 公差手動輸入 ─────────────────────────────────────
 function onTolInput(inp) {
+  if (!inp) return;
   const row = parseInt(inp.dataset.row);
-  const dims = currentData?.dimensions || [];
-  const nomVal = dims[row]?.nominal;
-  const nom = nomVal != null ? parseFloat(nomVal) : null;
+  // 先從 tr.dataset.nominal 取（AI 列），再從 .nom-input 取（手動列）
+  const tr = inp.closest('tr');
+  const nomStr = tr?.dataset.nominal || tr?.querySelector('.nom-input')?.value || '';
+  const nom = nomStr !== '' ? parseFloat(nomStr) : null;
 
   const upperInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="upper"]`);
   const lowerInp = document.querySelector(`.tol-input[data-row="${row}"][data-sign="lower"]`);
@@ -956,17 +994,10 @@ function exportExcel() {
     ['檢驗日期', date, '備注', remark, '', ''],
     [],
     ['#','量測項目','標稱值','單位','公差(+)','公差(-)','量測工具','M1','M2','M3','M4','M5','判定'],
-    ...dims.map((dim,idx) => {
-      const uInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="upper"]`);
-      const lInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="lower"]`);
-      const utol = uInp?.value.trim() !== '' ? `+${uInp.value}` : '';
-      const ltol = lInp?.value.trim() !== '' ? `${lInp.value}` : '';
-      const tool = document.querySelector(`.tool-select[data-row="${idx}"]`)?.value || '';
-      const meas = [...document.querySelectorAll(`.meas-input[data-row="${idx}"]`)]
-                     .map(i => i.value.trim() !== '' ? parseFloat(i.value) : '');
-      const verdict = document.getElementById(`verdict-${idx}`)
-                        ?.querySelector('[class^="badge-"]')?.textContent.trim() || '';
-      return [dim.item_no??idx+1, dim.name, dim.nominal, dim.unit||'mm', utol, ltol, tool, ...meas, verdict];
+    ...collectTableRows().map(r => {
+      const utol = r.utol != null ? `+${r.utol}` : '';
+      const ltol = r.ltol != null ? `${r.ltol}` : '';
+      return [r.no, r.name, r.nominal, r.unit, utol, ltol, r.tool, ...r.meas, r.verdict];
     })
   ];
 
@@ -977,6 +1008,108 @@ function exportExcel() {
   XLSX.utils.book_append_sheet(wb, ws, '量測檢表');
   const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
   XLSX.writeFile(wb, `量測檢表_${(part||'drawing').replace(/[/\\:*?"<>|]/g,'_')}_${ts}.xlsx`);
+}
+
+// ── 新增 / 刪除量測列 ─────────────────────────────────
+function addRow() {
+  if (extraRowCount >= MAX_EXTRA) {
+    alert(`最多只能新增 ${MAX_EXTRA} 列`); return;
+  }
+  extraRowCount++;
+  const dataRow = nextRowIdx++;
+  const tbody   = document.getElementById('table-body');
+  const rowNo   = tbody.querySelectorAll('tr').length + 1;
+
+  const measCells = [1,2,3,4,5].map(n => `
+    <td>
+      <input type="number" step="any" class="meas-input"
+        data-row="${dataRow}" data-col="${n}"
+        data-upper="" data-lower=""
+        placeholder="—" oninput="onInput(this)">
+    </td>`).join('');
+
+  const tr = document.createElement('tr');
+  tr.dataset.idx    = dataRow;
+  tr.dataset.manual = '1';
+  tr.dataset.nominal = '';
+  tr.dataset.unit    = 'mm';
+  tr.innerHTML = `
+    <td>${rowNo}</td>
+    <td class="name-col">
+      <input type="text" class="name-input" placeholder="輸入量測項目名稱">
+    </td>
+    <td>
+      <input type="number" step="any" class="nom-input"
+        data-row="${dataRow}" placeholder="—"
+        oninput="this.closest('tr').dataset.nominal=this.value;onTolInput(this.closest('tr').querySelector('.tol-input'))">
+    </td>
+    <td><input type="number" step="any" class="tol-input tol-pos"
+      data-row="${dataRow}" data-sign="upper" value="" placeholder="—"
+      oninput="onTolInput(this)"></td>
+    <td><input type="number" step="any" class="tol-input tol-neg"
+      data-row="${dataRow}" data-sign="lower" value="" placeholder="—"
+      oninput="onTolInput(this)"></td>
+    <td>
+      <select class="tool-select" data-row="${dataRow}">
+        <option value="">— 選擇 —</option>
+        <option value="V">V 卡尺</option>
+        <option value="C">C CCD</option>
+        <option value="P">P 厚薄規</option>
+        <option value="J">J 檢具</option>
+      </select>
+    </td>
+    ${measCells}
+    <td id="verdict-${dataRow}"><span class="badge-pending">待量測</span></td>
+    <td><button class="btn-del-row" onclick="deleteRow(this)" title="刪除此列">✕</button></td>
+  `;
+  tbody.appendChild(tr);
+
+  // 更新新增按鈕提示
+  const btn = document.getElementById('add-row-btn');
+  if (btn) btn.title = `已新增 ${extraRowCount}/${MAX_EXTRA} 列`;
+  updateStats();
+}
+
+function deleteRow(btn) {
+  const tr = btn.closest('tr');
+  if (tr.dataset.manual) extraRowCount--;
+  tr.remove();
+  // 重新編號 # 欄
+  document.querySelectorAll('#table-body tr').forEach((row, i) => {
+    row.cells[0].textContent = i + 1;
+  });
+  updateStats();
+}
+
+// 收集所有可見列資料（供 Export 使用）
+function collectTableRows() {
+  const rows = [];
+  document.querySelectorAll('#table-body tr').forEach((tr, visIdx) => {
+    // 名稱
+    const nameCell = tr.querySelector('td.name-col');
+    const name = nameCell?.querySelector('.name-input')?.value
+               || nameCell?.textContent?.trim() || '';
+    // 標稱
+    const nominal = tr.dataset.nominal || '';
+    const unit    = tr.dataset.unit    || 'mm';
+    // 公差
+    const uInp  = tr.querySelector('.tol-input[data-sign="upper"]');
+    const lInp  = tr.querySelector('.tol-input[data-sign="lower"]');
+    const utol  = uInp?.value.trim() !== '' ? parseFloat(uInp.value) : null;
+    const ltol  = lInp?.value.trim() !== '' ? parseFloat(lInp.value) : null;
+    // 工具
+    const tool = tr.querySelector('.tool-select')?.value || '';
+    // 量測值
+    const meas = [1,2,3,4,5].map(n => {
+      const v = tr.querySelector(`.meas-input[data-col="${n}"]`)?.value.trim();
+      return v !== '' && v != null ? v : '';
+    });
+    // 判定
+    const verdict = tr.querySelector('[class^="badge-"]')?.textContent.trim() || '';
+
+    rows.push({ no: visIdx+1, name, nominal, unit, utol, ltol, tool, meas, verdict });
+  });
+  return rows;
 }
 
 // ── 匯出 PDF（新頁籤，含球標圖面 + 檢表）────────────────
@@ -1003,30 +1136,22 @@ function exportPDF() {
   }).join('');
 
   // ── 表格列 HTML ───────────────────────────────────
-  const rowsHTML = dims.map((dim, idx) => {
-    const uInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="upper"]`);
-    const lInp = document.querySelector(`.tol-input[data-row="${idx}"][data-sign="lower"]`);
-    const utolVal = uInp?.value.trim() !== '' ? `+${parseFloat(uInp.value)}` : '—';
-    const ltolVal = lInp?.value.trim() !== '' ? `${parseFloat(lInp.value)}` : '—';
-    const tool    = document.querySelector(`.tool-select[data-row="${idx}"]`)?.value || '';
-    const meas    = [1,2,3,4,5].map(n => {
-      const v = document.querySelector(`.meas-input[data-row="${idx}"][data-col="${n}"]`)?.value.trim() || '';
-      return `<td>${v || ''}</td>`;
-    }).join('');
-    const verdictEl = document.getElementById(`verdict-${idx}`)?.querySelector('[class^="badge-"]');
-    const verdict   = verdictEl?.textContent.trim() || '待量測';
-    const vStyle    = verdict.includes('OK') ? 'color:#15803d;font-weight:800'
-                    : verdict.includes('NG') ? 'color:#b91c1c;font-weight:800'
-                    : 'color:#92400e';
+  const rowsHTML = collectTableRows().map(r => {
+    const utolVal = r.utol != null ? `+${r.utol}` : '—';
+    const ltolVal = r.ltol != null ? `${r.ltol}` : '—';
+    const measTds = r.meas.map(v => `<td>${v}</td>`).join('');
+    const vStyle  = r.verdict.includes('OK') ? 'color:#15803d;font-weight:800'
+                  : r.verdict.includes('NG') ? 'color:#b91c1c;font-weight:800'
+                  : 'color:#92400e';
     return `<tr>
-      <td>${dim.item_no ?? idx+1}</td>
-      <td style="text-align:left;padding-left:6px">${dim.name || ''}</td>
-      <td>${dim.nominal ?? '—'} <span style="color:#94a3b8;font-size:.75em">${dim.unit||'mm'}</span></td>
+      <td>${r.no}</td>
+      <td style="text-align:left;padding-left:6px">${r.name}</td>
+      <td>${r.nominal || '—'} <span style="color:#94a3b8;font-size:.75em">${r.unit}</span></td>
       <td style="color:#059669;font-weight:700">${utolVal}</td>
       <td style="color:#dc2626;font-weight:700">${ltolVal}</td>
-      <td>${tool}</td>
-      ${meas}
-      <td style="${vStyle}">${verdict}</td>
+      <td>${r.tool}</td>
+      ${measTds}
+      <td style="${vStyle}">${r.verdict}</td>
     </tr>`;
   }).join('');
 
